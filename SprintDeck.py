@@ -273,29 +273,54 @@ if load_btn and sel_path:
                     if p_name: contrib_data[p_name]["PRs"] += 1
             if contrib_data:
                 st.write(pd.DataFrame([{"Contributor": k, **v} for k, v in contrib_data.items()]).to_html(index=False), unsafe_allow_html=True)
+            
+            st.markdown("""
+                <style>
+                /* Force tables to wrap text and not crop content */
+                table { width: 100% !important; }
+                td { 
+                    white-space: normal !important; 
+                    word-wrap: break-word !important; 
+                    vertical-align: top !important; 
+                    min-width: 100px;
+                }
+                /* Ensure the Bug IDs column has enough room */
+                th:last-child, td:last-child { min-width: 250px; }
+                </style>
+            """, unsafe_allow_html=True)
 
             # --- QA & BUGS SECTION ---
             st.markdown('<div class="section-header">👩‍🔬 QA Activity & Bugs Logged</div>', unsafe_allow_html=True)
             q1, q2 = st.columns(2)
+
             with q1:
                 st.write("**Test Cases Created**")
                 qa_df = pd.DataFrame([{"QA Name": n, "Count": c} for n, c in qa_activity.items()])
                 st.write(qa_df.to_html(index=False), unsafe_allow_html=True)
+
             with q2:
                 st.write("**Bugs Created By**")
-                bugs_logged_df = pd.DataFrame([{"Creator": c, "Total Bugs": len(l), "Bug IDs": ", ".join(l)} for c, l in bug_creators.items()])
+                bugs_logged_df = pd.DataFrame([
+                    {"Creator": c, "Total Bugs": len(l), "Bug IDs": ", ".join(l)} 
+                    for c, l in bug_creators.items()
+                ])
+                
                 if not bugs_logged_df.empty:
                     ui_bug_df = bugs_logged_df.copy()
                     
-                    # UPDATED LOGIC: Only the ID becomes a blue link, Status remains plain text
+                    # Format: BLUE ID (Clickable) + Plain Status
+                    # Added a <span> wrapper to ensure the status stays grouped with the ID
                     ui_bug_df["Bug IDs"] = ui_bug_df["Bug IDs"].apply(
                         lambda x: ", ".join([
-                            f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{i.split()[0]}" target="_blank">{i.split()[0]}</a> {i.split()[1]}' 
-                            if len(i.split()) > 1 else i for i in x.split(", ")
+                            f'<span style="display:inline-block; margin-right:5px;">'
+                            f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{i.split()[0]}" target="_blank">{i.split()[0]}</a>'
+                            f' {" ".join(i.split()[1:]) if len(i.split()) > 1 else ""}</span>'
+                            for i in x.split(", ")
                         ])
                     )
                     
-                    st.write(ui_bug_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+                    # Displaying with full container width
+                    st.write(ui_bug_df.to_html(escape=False, index=False, justify='left'), unsafe_allow_html=True)
 
             # ======================
             # PREPARE DATA FOR EXCEL
