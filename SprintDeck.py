@@ -116,6 +116,28 @@ def get_sprint_contributors(data_map, pr_lookup):
             if dev: contributors[dev]["PRs"] += 1
     return contributors
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_developer_when_in_progress(work_item_id, project):
+    url = f"https://dev.azure.com/{ORG}/{urllib.parse.quote(project)}/_apis/wit/workItems/{work_item_id}/revisions?api-version=7.0"
+    response = requests.get(url, auth=AUTH)
+
+    if response.status_code != 200:
+        return "Unknown"
+
+    for rev in response.json().get("value", []):
+        fields = rev.get("fields", {})
+        state = fields.get("System.State", "")
+        assigned = fields.get("System.AssignedTo", {})
+
+        if state in ["In Progress", "Active"]:
+            if isinstance(assigned, dict):
+                return assigned.get("displayName", "Unknown")
+            return assigned
+
+    return "Not Found"
+
+
+
 # ======================
 # MAIN UI
 # ======================
@@ -136,6 +158,17 @@ if load_btn and sel_iteration:
         if r.status_code == 200:
             sprint_ids = [wi['id'] for wi in r.json().get('workItems', [])]
             data_map = fetch_details(sprint_ids)
+            story_ids = [sid for sid, i in data_map.items() if i["type"] in STORY_TYPES]
+            developer_worked_map = {}
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                results = executor.map(
+                    lambda sid: (sid, get_developer_when_in_progress(sid, sel_project)),
+                    story_ids
+                )
+
+            for sid, dev in results:
+                developer_worked_map[sid] = dev
             
             # --- Metrics calculation ---
             m_stats = {"ts": 0, "cs": 0, "bi": 0, "bf": 0, "tc": 0}
@@ -148,6 +181,7 @@ if load_btn and sel_iteration:
                 for url in item["pr_links"]: all_pr_urls.add(url)
 
                 if t in STORY_TYPES:
+                    developer_worked = developer_worked_map.get(sid, "N/A")
                     m_stats["ts"] += 1
                     if s in CLOSED_STATES: m_stats["cs"] += 1
                     
@@ -165,6 +199,8 @@ if load_btn and sel_iteration:
                         "Title": item["title"],
                         "Current Status": s,
                         "Story Points": item.get("story_points", 0),
+                        "Linked Bugs (Clickable)": ", ".join(bugs_links) if bugs_links else "—",
+                        "Developer Worked": developer_worked,   # ✅ NEW COLUMN
                         "Linked Bugs (Clickable)": ", ".join(bugs_links) if bugs_links else "—"
                     })
 
