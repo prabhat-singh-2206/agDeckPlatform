@@ -274,32 +274,28 @@ if load_btn and sel_path:
             if contrib_data:
                 st.write(pd.DataFrame([{"Contributor": k, **v} for k, v in contrib_data.items()]).to_html(index=False), unsafe_allow_html=True)
 
-            # --- QA ACTIVITY & BUGS LOGGED UI ---
+            # --- QA & BUGS SECTION ---
             st.markdown('<div class="section-header">👩‍🔬 QA Activity & Bugs Logged</div>', unsafe_allow_html=True)
             q1, q2 = st.columns(2)
-            
-            # 1. QA Test Cases Table
-            qa_df = pd.DataFrame([{"QA Name": n, "Count": c} for n, c in qa_activity.items()])
             with q1:
                 st.write("**Test Cases Created**")
+                qa_df = pd.DataFrame([{"QA Name": n, "Count": c} for n, c in qa_activity.items()])
                 st.write(qa_df.to_html(index=False), unsafe_allow_html=True)
-            
-            # 2. Bugs Logged Table (UI Version with Clickable Links)
-            bugs_logged_df = pd.DataFrame([
-                {"Creator": c, "Total Bugs": len(l), "Bug IDs": ", ".join(l)}
-                for c, l in bug_creators.items()
-            ])
-            
             with q2:
                 st.write("**Bugs Created By**")
+                bugs_logged_df = pd.DataFrame([{"Creator": c, "Total Bugs": len(l), "Bug IDs": ", ".join(l)} for c, l in bug_creators.items()])
                 if not bugs_logged_df.empty:
                     ui_bug_df = bugs_logged_df.copy()
+                    
+                    # UPDATED LOGIC: Only the ID becomes a blue link, Status remains plain text
                     ui_bug_df["Bug IDs"] = ui_bug_df["Bug IDs"].apply(
-                        lambda x: ", ".join([f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{i.split()[0]}" target="_blank">{i}</a>' for i in x.split(", ")])
+                        lambda x: ", ".join([
+                            f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{i.split()[0]}" target="_blank">{i.split()[0]}</a> {i.split()[1]}' 
+                            if len(i.split()) > 1 else i for i in x.split(", ")
+                        ])
                     )
+                    
                     st.write(ui_bug_df.to_html(escape=False, index=False), unsafe_allow_html=True)
-                else:
-                    st.write("No bugs logged.")
 
             # ======================
             # PREPARE DATA FOR EXCEL
