@@ -181,21 +181,51 @@ if load_btn and sel_path:
                 if t in STORY_TYPES:
                     m_stats["ts"] += 1
                     if s in CLOSED_STATES: m_stats["cs"] += 1
-                    bugs_links = [f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{lid}" target="_blank">{lid}</a> ({data_map[int(lid)]["state"]})' 
-                                 for lid in item["raw_links"] if int(lid) in data_map and data_map[int(lid)]["type"] == "Bug"]
-                    
+
+                    # Linked bugs for this story
+                    bugs_links = [
+                        f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{int(lid)}" target="_blank">{lid}</a> ({data_map[int(lid)]["state"]})'
+                        for lid in item["raw_links"]
+                        if int(lid) in data_map and data_map[int(lid)]["type"] == "Bug"
+                    ]
+
                     linkage_table.append({
-                        "Type": t, "ID": f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{sid}" target="_blank">{sid}</a>', 
-                        "Title": item["title"], "Status": s, "Points": item.get("story_points", 0),
-                        "Bugs": ", ".join(bugs_links) if bugs_links else "—", "Dev": dev_results.get(sid, "N/A")
+                        "Type": t,
+                        "ID": f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{sid}" target="_blank">{sid}</a>',
+                        "Title": item["title"],
+                        "Status": s,
+                        "Points": item.get("story_points", 0),
+                        "Bugs": ", ".join(bugs_links) if bugs_links else "—",
+                        "Dev": dev_results.get(sid, "N/A")
                     })
+
                 elif t == "Bug":
                     m_stats["bi"] += 1
                     if s in CLOSED_STATES: m_stats["bf"] += 1
                     bug_creators[creator].append(f'{sid} ({s})')
+
+                    # Independent bug entry in linkage table
+                    # Only if it is not linked to a story
+                    is_linked = any(
+                        sid in item2.get("raw_links", [])
+                        for item2 in data_map.values()
+                        if item2["type"] in STORY_TYPES
+                    )
+                    if not is_linked:
+                        linkage_table.append({
+                            "Type": t,
+                            "ID": f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{sid}" target="_blank">{sid}</a>',
+                            "Title": item["title"],
+                            "Status": s,
+                            "Points": 0,
+                            "Bugs": "—",
+                            "Dev": dev_results.get(sid, "N/A")
+                        })
+
                 elif t == "Test Case":
                     m_stats["tc"] += 1
                     qa_activity[assigned] += 1
+
 
             pr_lookup = {}
             if all_pr_urls:
@@ -220,25 +250,89 @@ if load_btn and sel_path:
                 st.markdown(f'<div class="health-card" style="background-color: {health_color};">💖 Sprint Health: {health_label}</div>', unsafe_allow_html=True)
 
             # --- RESOURCE MATRIX (KANBAN ONLY) ---
+            # --- RESOURCE PERFORMANCE MATRIX (KANBAN ONLY) ---
+            # --- RESOURCE PERFORMANCE MATRIX (KANBAN ONLY | FIXED) ---
             if is_kanban:
-                st.markdown('<div class="section-header">👤 Resource Performance Matrix</div>', unsafe_allow_html=True)
-                res_stats = defaultdict(lambda: {"Stories": 0, "Bugs": 0, "PRs": 0})
-                for sid, item in data_map.items():
-                    u = item["assigned_to"]
-                    if u != "Unassigned":
-                        if item["type"] in STORY_TYPES: res_stats[u]["Stories"] += 1
-                        elif item["type"] == "Bug": res_stats[u]["Bugs"] += 1
-                    for url in item["pr_links"]:
-                        owner = pr_lookup.get(url)
-                        if owner: res_stats[owner]["PRs"] += 1
-                for res, stats in res_stats.items():
-                    with st.container():
-                        st.markdown(f'<div class="resource-card"><div class="resource-name">{res}</div>', unsafe_allow_html=True)
-                        _, r1, r2, r3 = st.columns([1, 1, 1, 1])
-                        r1.metric("Stories", stats["Stories"])
-                        r2.metric("Bugs", stats["Bugs"])
-                        r3.metric("PRs", stats["PRs"])
-                        st.markdown('</div>', unsafe_allow_html=True)
+                st.markdown('<div class="section-header">👥 Team Contribution Matrix (Kanban)</div>', unsafe_allow_html=True)
+
+                # contribution[area][person] → counts
+                contribution = defaultdict(lambda: defaultdict(lambda: {
+                    "User Stories": 0,
+                    "Bugs": 0,
+                    "PRs": 0
+                }))
+
+                # cache revision calls
+                @st.cache_data(ttl=3600, show_spinner=False)
+                def get_contributors(work_item_id, project):
+                    url = f"https://dev.azure.com/{ORG}/{urllib.parse.quote(project)}/_apis/wit/workItems/{work_item_id}/revisions?api-version=7.0"
+                    users = set()
+                    try:
+                        r = requests.get(url, auth=AUTH)
+                        if r.status_code == 200:
+                            for rev in r.json().get("value", []):
+                                fields = rev.get("fields", {})
+                                changed_by = fields.get("System.ChangedBy")
+                                if isinstance(changed_by, dict):
+                                    users.add(changed_by.get("displayName"))
+                    except:
+                        pass
+                    return users
+
+                # --- Collect contributors ---
+                with ThreadPoolExecutor(max_workers=10) as exe:
+                    revision_results = dict(
+                        exe.map(lambda sid: (sid, get_contributors(sid, sel_project)), data_map.keys())
+                    )
+
+                for wid, item in data_map.items():
+                    area = item.get("area_path", sel_path)
+                    wtype = item["type"]
+
+                    # STORY / BUG contributions
+                    if wtype in STORY_TYPES or wtype == "Bug":
+                        for user in revision_results.get(wid, []):
+                            if not user:
+                                continue
+                            if wtype in STORY_TYPES:
+                                contribution[area][user]["User Stories"] += 1
+                            elif wtype == "Bug":
+                                contribution[area][user]["Bugs"] += 1
+
+                    # PR contributions
+                    for pr_url in item["pr_links"]:
+                        pr_owner = pr_lookup.get(pr_url)
+                        if pr_owner:
+                            contribution[area][pr_owner]["PRs"] += 1
+
+                # --- Render UI ---
+                for area, members in contribution.items():
+                    st.subheader(f"📐 Area Path: {area}")
+
+                    rows = []
+                    for person, stats in members.items():
+                        rows.append({
+                            "Team Member": person,
+                            **stats,
+                            "Total": sum(stats.values())
+                        })
+
+                    df = pd.DataFrame(rows).sort_values("Total", ascending=False)
+
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                # --- Save for Excel ---
+                res_stats = {
+                    f"{area} | {person}": stats
+                    for area, members in contribution.items()
+                    for person, stats in members.items()
+                }
+
+            
 
             # --- DISTRIBUTION ---
             st.markdown('<div class="section-header">📊 Work Item Distribution</div>', unsafe_allow_html=True)
