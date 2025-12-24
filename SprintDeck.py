@@ -31,6 +31,7 @@ st.markdown("""
 
 ORG = "lloydsregistergroup"
 PAT = st.secrets["AZURE_DEVOPS_PAT"]
+#PAT = ""  # Replace with your actual PAT or use secrets management
 AUTH = HTTPBasicAuth("", PAT)
 HEADERS = {"Content-Type": "application/json"}
 
@@ -132,11 +133,12 @@ def get_developer_when_in_progress(work_item_id, project):
 # ======================
 # MAIN UI
 # ======================
+st.image("aventra_logo.png", width=120)
 st.title("📊 Delivery Execution Matrix")
 
 with st.sidebar:
     st.header("⚙️ View Settings")
-    is_kanban = st.toggle("🚀 Kanban Mode")
+    is_kanban = st.toggle("🚀 Sprint ↔ Kanban")
     lookback_days = 30
     if is_kanban:
         time_choice = st.selectbox("⏳ Timeframe", ["Last 30 Days", "Last 60 Days", "Last 180 Days", "Last Year"])
@@ -504,3 +506,10 @@ if load_btn and sel_path:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="download_btn"
         )
+# Footer
+st.markdown(
+    "<div style='text-align:center;color:gray;font-size:12px;'>"
+    "© 2026 Aventra Digital Pvt. Ltd. | Internal Use Only"
+    "</div>",
+    unsafe_allow_html=True
+)
