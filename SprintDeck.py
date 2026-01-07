@@ -9,6 +9,7 @@ import re
 import plotly.express as px
 from datetime import datetime
 from io import BytesIO
+from resource_view import render_resource_view
 
 # ======================
 # CONFIG & BEAUTIFICATION
@@ -136,13 +137,27 @@ def get_developer_when_in_progress(work_item_id, project):
 st.image("aventra_logo.png", width=120)
 st.title("📊 Delivery Execution Matrix")
 
+# ======================
+# VIEW SELECTION
+# ======================
+view_mode = st.radio(
+    "Select View",
+    ["Delivery Execution", "Resource Execution"],
+    horizontal=True
+)
+
+# --- RESOURCE EXECUTION VIEW ---
+if view_mode == "Resource Execution":
+    render_resource_view(AUTH)
+    st.stop()   # ⛔ VERY IMPORTANT: stops Delivery/Kanban code
+
 with st.sidebar:
     st.header("⚙️ View Settings")
     is_kanban = st.toggle("🚀 Sprint ↔ Kanban")
     lookback_days = 30
     if is_kanban:
-        time_choice = st.selectbox("⏳ Timeframe", ["Last 30 Days", "Last 60 Days", "Last 180 Days", "Last Year"])
-        days_lookup = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 180 Days": 180, "Last Year": 365}
+        time_choice = st.selectbox("⏳ Timeframe", ["Last 30 Days", "Last 60 Days","Last 90 Days", "Last 180 Days", "Last Year"])
+        days_lookup = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90, "Last 180 Days": 180, "Last Year": 365}
         lookback_days = days_lookup[time_choice]
 
 with st.container(border=True):
