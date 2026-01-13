@@ -168,8 +168,18 @@ with st.container(border=True):
             sel_path = st.selectbox("📐 Area Path", get_area_paths(sel_project) if sel_project else [])
             path_filter = f"[System.AreaPath] UNDER '{sel_path}' AND [System.ChangedDate] >= @today - {lookback_days}"
         else:
-            sel_path = st.selectbox("🏁 Iteration Path", get_iteration_paths(sel_project) if sel_project else [])
+            # UPDATED: Use the utility function that returns dates
+            from iteration_utils import get_iteration_paths_with_dates
+            
+            paths, date_map_lookup = get_iteration_paths_with_dates(sel_project)
+            sel_path = st.selectbox("🏁 Iteration Path", paths if sel_project else [])
             path_filter = f"[System.IterationPath] UNDER '{sel_path}'"
+
+            # NEW: Display dates if they exist for the selected path
+            if sel_path in date_map_lookup:
+                s_date = date_map_lookup[sel_path]['start']
+                e_date = date_map_lookup[sel_path]['end']
+                st.caption(f"📅 **Sprint Duration:** {s_date} to {e_date}")
     with c3: load_btn = st.button("🚀 Load Dashboard", type="primary", use_container_width=True)
 
 if load_btn and sel_path:
@@ -251,6 +261,18 @@ if load_btn and sel_path:
 
             # --- KPI & HEALTH SECTION ---
             st.markdown('<div class="section-header">📈 KPI Performance Metrics</div>', unsafe_allow_html=True)
+            # NEW: Show Dates at the top of KPIs
+            # NEW: Display Sprint Dates in balanced, compact columns
+            if not is_kanban and sel_path in date_map_lookup:
+                # Use small equal ratios and a large spacer to prevent stretching
+                d1, d2, spacer = st.columns([1.5, 1.5, 5]) 
+                
+                with d1:
+                    st.info(f"🗓️ **Start:** {date_map_lookup[sel_path]['start']}")
+                with d2:
+                    st.info(f"🏁 **End:** {date_map_lookup[sel_path]['end']}")
+
+            s_perc = int((m_stats["cs"]/m_stats["ts"])*100) if m_stats["ts"] > 0 else 0
             s_perc = int((m_stats["cs"]/m_stats["ts"])*100) if m_stats["ts"] > 0 else 0
             b_perc = int((m_stats["bf"]/m_stats["bi"])*100) if m_stats["bi"] > 0 else 0
             
@@ -439,6 +461,8 @@ if load_btn and sel_path:
             
             # 1. KPI Sheet
             kpi_data = [
+                {"Metric": "Sprint Start Date", "Value": date_map_lookup.get(sel_path, {}).get("start", "N/A")},
+                {"Metric": "Sprint End Date", "Value": date_map_lookup.get(sel_path, {}).get("end", "N/A")},
                 {"Metric": "Total Stories", "Value": m_stats["ts"]},
                 {"Metric": "Stories Closed", "Value": m_stats["cs"]},
                 {"Metric": "Story Closure %", "Value": f"{s_perc}%"},
