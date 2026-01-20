@@ -159,7 +159,13 @@ view_mode = st.radio(
 if view_mode == "Squad Governance":
     st.title("🛡️ Project Governance & Squad Health")
     
-    # Fetch Projects
+    # 1. Initialize session state
+    if 'gov_results' not in st.session_state:
+        st.session_state.gov_results = None
+    # Track if a search has been attempted to prevent "default" warnings
+    if 'search_attempted' not in st.session_state:
+        st.session_state.search_attempted = False
+
     all_projects = get_all_projects(ORG, AUTH)
     
     with st.expander("⚙️ Report Settings", expanded=True):
@@ -171,73 +177,84 @@ if view_mode == "Squad Governance":
         
         run_btn = st.button("🚀 Run Analysis", type="primary")
 
+    # 2. DATA PROCESSING
     if run_btn:
+        st.session_state.search_attempted = True # User has now tried to run it
         with st.spinner("Crunching Azure DevOps Data..."):
-            df = get_area_governance_report(ORG, sel_proj, lookback, AUTH, STORY_TYPES)
+            df_result = get_area_governance_report(ORG, sel_proj, lookback, AUTH, STORY_TYPES)
             
-            if not df.empty and (df["Total Stories"].sum() + df["Bugs Found"].sum() > 0):
-                
-                # --- 1. UI DISPLAY ---
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Active Squads", len(df))
-                m2.metric("Total Stories", int(df["Total Stories"].sum()))
-                m3.metric("Bugs Logged", int(df["Bugs Found"].sum()))
-                m4.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
-
-                # Create the chart
-                fig_health = px.bar(
-                    df, x="Squad Name", y="Health Score", 
-                    color="Health Score", color_continuous_scale="RdYlGn",
-                    title=f"Squad Health Overview: {sel_proj}"
-                )
-                st.plotly_chart(fig_health, use_container_width=True)
-                st.dataframe(df.drop(columns=["Full Area Path"], errors='ignore'), hide_index=True)
-
-                # --- 2. EXCEL EXPORT ---
-                output = BytesIO() # This uses the 'from io import BytesIO' import
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Raw_Data')
-                    
-                    workbook = writer.book
-                    worksheet = workbook.add_worksheet('Dashboard')
-                    
-                    # --- 2. STABILIZED EXCEL EXPORT ---
-                # Generate chart bytes BEFORE opening the Excel writer to avoid state desync
-                try:
-                    # Kaleido can be unstable in production; this pre-generates the image
-                    img_bytes = fig_health.to_image(format="png", engine="kaleido")
-                    image_data = io.BytesIO(img_bytes)
-                except Exception as e:
-                    image_data = None
-                    st.error(f"Chart Export Error: {e}")
-
-                output = io.BytesIO() 
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Raw_Data')
-                    
-                    workbook = writer.book
-                    worksheet = workbook.add_worksheet('Dashboard')
-                    
-                    # Write summary text
-                    worksheet.write('B2', f'Governance Dashboard for {sel_proj}')
-                    
-                    # Only try to insert the image if it was successfully generated
-                    if image_data:
-                        worksheet.insert_image('B4', 'health_chart.png', {'image_data': image_data})
-                    else:
-                        worksheet.write('B4', 'Chart could not be generated.')
-
-                # Provide the download button in the sidebar AFTER the process completes
-                st.sidebar.download_button(
-                    label="📥 Download Excel with Charts",
-                    data=output.getvalue(),
-                    file_name=f"Governance_{sel_proj}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="gov_download_btn" # Unique key prevents Delta Path errors
-                )
-
+            if not df_result.empty and (df_result["Total Stories"].sum() + df_result["Bugs Found"].sum() > 0):
+                st.session_state.gov_results = {
+                    "df": df_result,
+                    "project": sel_proj,
+                    "timestamp": datetime.now().strftime("%Y%m%d_%H%M")
+                }
             else:
+                st.session_state.gov_results = None
+                # Warning appears here immediately after clicking if no data found
                 st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")
+
+    # 3. UI RENDERING (Persists after the button click)
+    if st.session_state.gov_results:
+        res = st.session_state.gov_results
+        df = res["df"]
+        
+        # --- Metrics ---
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Active Squads", len(df))
+        m2.metric("Total Stories", int(df["Total Stories"].sum()))
+        m3.metric("Bugs Logged", int(df["Bugs Found"].sum()))
+        m4.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
+
+        # --- Chart ---
+        fig_health = px.bar(
+            df, x="Squad Name", y="Health Score", 
+            color="Health Score", color_continuous_scale="RdYlGn",
+            title=f"Squad Health Overview: {res['project']}"
+        )
+        st.plotly_chart(fig_health, use_container_width=True, key="gov_plotly")
+        
+        # --- Data Table ---
+        st.dataframe(
+            df.drop(columns=["Full Area Path"], errors='ignore'), 
+            hide_index=True, 
+            use_container_width=True,
+            key="gov_table"
+        )
+
+        # --- 4. EXCEL GENERATION ---
+        try:
+            img_bytes = fig_health.to_image(format="png", engine="kaleido")
+            image_data = io.BytesIO(img_bytes)
+        except Exception as e:
+            image_data = None
+            st.error(f"Graph rendering skipped in Excel: {e}")
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Data_Report')
+            workbook = writer.book
+            worksheet = workbook.add_worksheet('Dashboard')
+            header_format = workbook.add_format({'bold': True, 'font_size': 14, 'font_color': '#0078d4'})
+            worksheet.write('B2', f"Governance Report: {res['project']}", header_format)
+            
+            if image_data:
+                worksheet.insert_image('B5', 'health_chart.png', {'image_data': image_data, 'x_scale': 0.8, 'y_scale': 0.8})
+
+        # --- 5. DOWNLOAD BUTTON ---
+        st.sidebar.download_button(
+            label="📥 Download Excel Report",
+            data=output.getvalue(),
+            file_name=f"Gov_Report_{res['project']}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="gov_export_stable"
+        )
+    
+    # 4. HANDLE PERSISTENT WARNING 
+    # This shows the warning if the last search resulted in None, 
+    # but only if a search was actually attempted.
+    elif st.session_state.search_attempted and st.session_state.gov_results is None:
+        st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")
 
 # --- RESOURCE EXECUTION VIEW ---
 if view_mode == "Resource Execution":
