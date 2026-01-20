@@ -21,7 +21,7 @@ iniconfig
 Jinja2
 jsonschema
 jsonschema-specifications
-kaleido==0.2.1.post1
+kaleido
 logistro
 MarkupSafe
 narwhals
@@ -65,3 +65,4 @@ tzdata
 urllib3
 watchdog
 xlsxwriter
+matplotlib

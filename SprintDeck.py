@@ -13,6 +13,8 @@ from resource_view import render_resource_view
 from governance_service import get_area_governance_report
 import plotly.express as px
 import io
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 # ======================
 # CONFIG & BEAUTIFICATION
@@ -162,7 +164,6 @@ if view_mode == "Squad Governance":
     # 1. Initialize session state
     if 'gov_results' not in st.session_state:
         st.session_state.gov_results = None
-    # Track if a search has been attempted to prevent "default" warnings
     if 'search_attempted' not in st.session_state:
         st.session_state.search_attempted = False
 
@@ -179,7 +180,7 @@ if view_mode == "Squad Governance":
 
     # 2. DATA PROCESSING
     if run_btn:
-        st.session_state.search_attempted = True # User has now tried to run it
+        st.session_state.search_attempted = True
         with st.spinner("Crunching Azure DevOps Data..."):
             df_result = get_area_governance_report(ORG, sel_proj, lookback, AUTH, STORY_TYPES)
             
@@ -191,10 +192,9 @@ if view_mode == "Squad Governance":
                 }
             else:
                 st.session_state.gov_results = None
-                # Warning appears here immediately after clicking if no data found
                 st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")
 
-    # 3. UI RENDERING (Persists after the button click)
+    # 3. UI RENDERING
     if st.session_state.gov_results:
         res = st.session_state.gov_results
         df = res["df"]
@@ -206,7 +206,7 @@ if view_mode == "Squad Governance":
         m3.metric("Bugs Logged", int(df["Bugs Found"].sum()))
         m4.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
 
-        # --- Chart ---
+        # --- Plotly Chart (For UI) ---
         fig_health = px.bar(
             df, x="Squad Name", y="Health Score", 
             color="Health Score", color_continuous_scale="RdYlGn",
@@ -215,33 +215,67 @@ if view_mode == "Squad Governance":
         st.plotly_chart(fig_health, use_container_width=True, key="gov_plotly")
         
         # --- Data Table ---
-        st.dataframe(
-            df.drop(columns=["Full Area Path"], errors='ignore'), 
-            hide_index=True, 
-            use_container_width=True,
-            key="gov_table"
-        )
+        st.dataframe(df.drop(columns=["Full Area Path"], errors='ignore'), hide_index=True, use_container_width=True)
 
-        # --- 4. EXCEL GENERATION ---
+        # --- 4. MATPLOTLIB FOR EXCEL (No Chrome Needed) ---
+        image_data = io.BytesIO()
         try:
-            img_bytes = fig_health.to_image(format="png", engine="kaleido")
-            image_data = io.BytesIO(img_bytes)
+            plt.figure(figsize=(10, 5))
+            
+            # 1. Setup normalization and colormap (Matches Plotly RdYlGn)
+            # We use the full 0-100 range for normalization to keep color consistent
+            norm = mcolors.Normalize(vmin=0, vmax=100) 
+            cmap = plt.get_cmap('RdYlGn')
+            
+            # 2. Map colors
+            bar_colors = [cmap(norm(value)) for value in df["Health Score"]]
+            
+            # 3. Create bars
+            bars = plt.bar(df["Squad Name"], df["Health Score"], color=bar_colors, edgecolor='black', linewidth=0.5)
+            
+            # 4. ADD DATA LABELS ON TOP OF BARS
+            for bar in bars:
+                height = bar.get_height()
+                plt.text(
+                    bar.get_x() + bar.get_width()/2., # X position: center of the bar
+                    height + 1,                       # Y position: just above the top
+                    f'{height:.1f}%',                 # The label text
+                    ha='center', va='bottom',         # Alignment
+                    fontsize=10, fontweight='bold'
+                )
+
+            # Styling
+            plt.title(f"Squad Health Overview: {res['project']}", fontsize=14, pad=20)
+            plt.ylabel("Health Score (%)", fontsize=12)
+            plt.ylim(0, 110) # Set to 110 to give room for the labels
+            plt.xticks(rotation=45, ha='right')
+            plt.grid(axis='y', linestyle='--', alpha=0.3)
+            plt.tight_layout()
+            
+            # Save to buffer
+            plt.savefig(image_data, format='png', dpi=100)
+            plt.close()
+            image_data.seek(0)
         except Exception as e:
             image_data = None
-            st.error(f"Graph rendering skipped in Excel: {e}")
+            st.error(f"Excel Chart Error: {e}")
 
+        # --- 5. EXCEL EXPORT ---
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='Data_Report')
-            workbook = writer.book
-            worksheet = workbook.add_worksheet('Dashboard')
-            header_format = workbook.add_format({'bold': True, 'font_size': 14, 'font_color': '#0078d4'})
-            worksheet.write('B2', f"Governance Report: {res['project']}", header_format)
             
             if image_data:
-                worksheet.insert_image('B5', 'health_chart.png', {'image_data': image_data, 'x_scale': 0.8, 'y_scale': 0.8})
+                workbook = writer.book
+                worksheet = workbook.add_worksheet('Dashboard')
+                header_format = workbook.add_format({'bold': True, 'font_size': 14, 'font_color': '#0078d4'})
+                worksheet.write('B2', f"Governance Report: {res['project']}", header_format)
+                worksheet.write('B3', f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+                
+                # Insert the Matplotlib image
+                worksheet.insert_image('B5', 'health_chart.png', {'image_data': image_data})
 
-        # --- 5. DOWNLOAD BUTTON ---
+        # --- 6. DOWNLOAD BUTTON ---
         st.sidebar.download_button(
             label="📥 Download Excel Report",
             data=output.getvalue(),
@@ -250,9 +284,6 @@ if view_mode == "Squad Governance":
             key="gov_export_stable"
         )
     
-    # 4. HANDLE PERSISTENT WARNING 
-    # This shows the warning if the last search resulted in None, 
-    # but only if a search was actually attempted.
     elif st.session_state.search_attempted and st.session_state.gov_results is None:
         st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")
 
