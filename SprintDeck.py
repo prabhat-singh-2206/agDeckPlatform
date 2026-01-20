@@ -194,7 +194,6 @@ if view_mode == "Squad Governance":
                 st.dataframe(df.drop(columns=["Full Area Path"], errors='ignore'), hide_index=True)
 
                 # --- 2. EXCEL EXPORT ---
-                # --- 2. EXCEL EXPORT ---
                 output = BytesIO() # This uses the 'from io import BytesIO' import
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df.to_excel(writer, index=False, sheet_name='Raw_Data')
@@ -202,27 +201,39 @@ if view_mode == "Squad Governance":
                     workbook = writer.book
                     worksheet = workbook.add_worksheet('Dashboard')
                     
-                    try:
-                        # We use the 'io' module here to handle bytes
-                        img_bytes = fig_health.to_image(format="png", engine="kaleido")
-                        image_data = io.BytesIO(img_bytes) # <--- Uses 'import io'
-                        
-                        # Insert the image into the Dashboard sheet
-                        worksheet.write('B2', f'Governance Dashboard for {sel_proj}')
-                        worksheet.insert_image('B4', 'health_chart.png', {'image_data': image_data})
-                        
-                    except Exception as e:
-                        # Captures and displays the specific error if it fails
-                        error_msg = f"Export failed: {str(e)}"
-                        worksheet.write('A1', error_msg)
-                        st.error(f"Excel Visual Error: {error_msg}")
+                    # --- 2. STABILIZED EXCEL EXPORT ---
+                # Generate chart bytes BEFORE opening the Excel writer to avoid state desync
+                try:
+                    # Kaleido can be unstable in production; this pre-generates the image
+                    img_bytes = fig_health.to_image(format="png", engine="kaleido")
+                    image_data = io.BytesIO(img_bytes)
+                except Exception as e:
+                    image_data = None
+                    st.error(f"Chart Export Error: {e}")
 
-                # Provide the download button
+                output = io.BytesIO() 
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Raw_Data')
+                    
+                    workbook = writer.book
+                    worksheet = workbook.add_worksheet('Dashboard')
+                    
+                    # Write summary text
+                    worksheet.write('B2', f'Governance Dashboard for {sel_proj}')
+                    
+                    # Only try to insert the image if it was successfully generated
+                    if image_data:
+                        worksheet.insert_image('B4', 'health_chart.png', {'image_data': image_data})
+                    else:
+                        worksheet.write('B4', 'Chart could not be generated.')
+
+                # Provide the download button in the sidebar AFTER the process completes
                 st.sidebar.download_button(
                     label="📥 Download Excel with Charts",
                     data=output.getvalue(),
                     file_name=f"Governance_{sel_proj}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="gov_download_btn" # Unique key prevents Delta Path errors
                 )
 
             else:
@@ -464,15 +475,7 @@ if view_mode == "Delivery Execution":
 
                 # --- LINKAGE MATRIX ---
                 st.markdown('<div class="section-header">🔗 User Story & Bug Linkage Matrix</div>', unsafe_allow_html=True)
-                st.dataframe(
-                            pd.DataFrame(linkage_table), 
-                            use_container_width=True, 
-                            hide_index=True,
-                            column_config={
-                                "ID": st.column_config.LinkColumn("Work Item ID"),
-                                "Bugs": st.column_config.TextColumn("Linked Bugs")
-                            }
-                        )
+                st.write(pd.DataFrame(linkage_table).to_html(escape=False, index=False), unsafe_allow_html=True)
 
                 # --- DEVELOPER PR ACTIVITY ---
                 st.markdown('<div class="section-header">👨‍💻 Developers Activity (PRs)</div>', unsafe_allow_html=True)
@@ -546,11 +549,7 @@ if view_mode == "Delivery Execution":
                         )
                         
                         # Displaying with full container width
-                        st.dataframe(
-                            bugs_logged_df, # Use the clean dataframe without the <span> tags
-                            use_container_width=True,
-                            hide_index=True
-                        )
+                        st.write(ui_bug_df.to_html(escape=False, index=False, justify='left'), unsafe_allow_html=True)
 
                 # ======================
                 # PREPARE DATA FOR EXCEL
