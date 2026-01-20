@@ -10,6 +10,9 @@ import plotly.express as px
 from datetime import datetime
 from io import BytesIO
 from resource_view import render_resource_view
+from governance_service import get_area_governance_report
+import plotly.express as px
+import io
 
 # ======================
 # CONFIG & BEAUTIFICATION
@@ -35,19 +38,24 @@ PAT = st.secrets["AZURE_DEVOPS_PAT"]
 #PAT = ""  # Replace with your actual PAT or use secrets management
 AUTH = HTTPBasicAuth("", PAT)
 HEADERS = {"Content-Type": "application/json"}
-
 STORY_TYPES = ["User Story", "Requirement", "Product Backlog Item"]
 CLOSED_STATES = {"Closed", "Resolved", "Done", "Completed"}
+date_map_lookup = {}
 
 # ======================
 # API HELPERS
 # ======================
 @st.cache_data(ttl=3600)
-def get_all_projects():
+def get_all_projects(org, _auth):  # Added underscore to _auth
+    url = f"https://dev.azure.com/{org}/_apis/projects?api-version=7.1&$top=1000"
     try:
-        r = requests.get(f"https://dev.azure.com/{ORG}/_apis/projects?api-version=6.0", auth=AUTH)
-        return sorted([p['name'] for p in r.json().get('value', [])])
-    except: return []
+        res = requests.get(url, auth=_auth) # Use the underscored name inside
+        if res.status_code == 200:
+            projects = [p['name'] for p in res.json()['value']]
+            return sorted(projects)
+    except Exception as e:
+        st.error(f"Error loading projects: {e}")
+    return []
 
 @st.cache_data(ttl=3600)
 def get_iteration_paths(project_name):
@@ -140,411 +148,488 @@ st.title("📊 Delivery Execution Matrix")
 # ======================
 # VIEW SELECTION
 # ======================
+
+# 1. Update the View Selection
 view_mode = st.radio(
     "Select View",
-    ["Delivery Execution", "Resource Execution"],
+    ["Delivery Execution", "Resource Execution", "Squad Governance"],
     horizontal=True
 )
+
+if view_mode == "Squad Governance":
+    st.title("🛡️ Project Governance & Squad Health")
+    
+    # Fetch Projects
+    all_projects = get_all_projects(ORG, AUTH)
+    
+    with st.expander("⚙️ Report Settings", expanded=True):
+        col_a, col_b = st.columns(2)
+        with col_a: 
+            sel_proj = st.selectbox("Select Project", all_projects)
+        with col_b: 
+            lookback = st.number_input("Lookback Window (Days)", value=30, min_value=1)
+        
+        run_btn = st.button("🚀 Run Analysis", type="primary")
+
+    if run_btn:
+        with st.spinner("Crunching Azure DevOps Data..."):
+            df = get_area_governance_report(ORG, sel_proj, lookback, AUTH, STORY_TYPES)
+            
+            if not df.empty and (df["Total Stories"].sum() + df["Bugs Found"].sum() > 0):
+                
+                # --- 1. UI DISPLAY ---
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Active Squads", len(df))
+                m2.metric("Total Stories", int(df["Total Stories"].sum()))
+                m3.metric("Bugs Logged", int(df["Bugs Found"].sum()))
+                m4.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
+
+                # Create the chart
+                fig_health = px.bar(
+                    df, x="Squad Name", y="Health Score", 
+                    color="Health Score", color_continuous_scale="RdYlGn",
+                    title=f"Squad Health Overview: {sel_proj}"
+                )
+                st.plotly_chart(fig_health, use_container_width=True)
+                st.dataframe(df.drop(columns=["Full Area Path"], errors='ignore'), hide_index=True)
+
+                # --- 2. EXCEL EXPORT ---
+                # --- 2. EXCEL EXPORT ---
+                output = BytesIO() # This uses the 'from io import BytesIO' import
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Raw_Data')
+                    
+                    workbook = writer.book
+                    worksheet = workbook.add_worksheet('Dashboard')
+                    
+                    try:
+                        # We use the 'io' module here to handle bytes
+                        img_bytes = fig_health.to_image(format="png", engine="kaleido")
+                        image_data = io.BytesIO(img_bytes) # <--- Uses 'import io'
+                        
+                        # Insert the image into the Dashboard sheet
+                        worksheet.write('B2', f'Governance Dashboard for {sel_proj}')
+                        worksheet.insert_image('B4', 'health_chart.png', {'image_data': image_data})
+                        
+                    except Exception as e:
+                        # Captures and displays the specific error if it fails
+                        error_msg = f"Export failed: {str(e)}"
+                        worksheet.write('A1', error_msg)
+                        st.error(f"Excel Visual Error: {error_msg}")
+
+                # Provide the download button
+                st.sidebar.download_button(
+                    label="📥 Download Excel with Charts",
+                    data=output.getvalue(),
+                    file_name=f"Governance_{sel_proj}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+            else:
+                st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")
 
 # --- RESOURCE EXECUTION VIEW ---
 if view_mode == "Resource Execution":
     render_resource_view(AUTH)
     st.stop()   # ⛔ VERY IMPORTANT: stops Delivery/Kanban code
 
-with st.sidebar:
-    st.header("⚙️ View Settings")
-    is_kanban = st.toggle("🚀 Sprint ↔ Kanban")
-    lookback_days = 30
-    if is_kanban:
-        time_choice = st.selectbox("⏳ Timeframe", ["Last 30 Days", "Last 60 Days","Last 90 Days", "Last 180 Days", "Last Year"])
-        days_lookup = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90, "Last 180 Days": 180, "Last Year": 365}
-        lookback_days = days_lookup[time_choice]
 
-with st.container(border=True):
-    c1, c2, c3 = st.columns([3, 4, 2], vertical_alignment="bottom")
-    with c1: sel_project = st.selectbox("📂 Project", get_all_projects())
-    with c2: 
+# --- DELIVERY EXECUTION VIEW ---
+if view_mode == "Delivery Execution":
+    with st.sidebar:
+        st.header("⚙️ View Settings")
+        is_kanban = st.toggle("🚀 Sprint ↔ Kanban")
+        lookback_days = 30
         if is_kanban:
-            sel_path = st.selectbox("📐 Area Path", get_area_paths(sel_project) if sel_project else [])
-            path_filter = f"[System.AreaPath] UNDER '{sel_path}' AND [System.ChangedDate] >= @today - {lookback_days}"
-        else:
-            # UPDATED: Use the utility function that returns dates
-            from iteration_utils import get_iteration_paths_with_dates
+            time_choice = st.selectbox("⏳ Timeframe", ["Last 30 Days", "Last 60 Days","Last 90 Days", "Last 180 Days", "Last Year"])
+            days_lookup = {"Last 30 Days": 30, "Last 60 Days": 60, "Last 90 Days": 90, "Last 180 Days": 180, "Last Year": 365}
+            lookback_days = days_lookup[time_choice]
+
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([3, 4, 2], vertical_alignment="bottom")
+        with c1: sel_project = st.selectbox("📂 Project", get_all_projects(ORG, AUTH))
+        with c2: 
+            if is_kanban:
+                sel_path = st.selectbox("📐 Area Path", get_area_paths(sel_project) if sel_project else [])
+                path_filter = f"[System.AreaPath] UNDER '{sel_path}' AND [System.ChangedDate] >= @today - {lookback_days}"
+            else:
+                # UPDATED: Use the utility function that returns dates
+                from iteration_utils import get_iteration_paths_with_dates
+                
+                paths, date_map_lookup = get_iteration_paths_with_dates(sel_project)
+                sel_path = st.selectbox("🏁 Iteration Path", paths if sel_project else [])
+                path_filter = f"[System.IterationPath] UNDER '{sel_path}'"
+
+                # NEW: Display dates if they exist for the selected path
+                if sel_path in date_map_lookup:
+                    s_date = date_map_lookup[sel_path]['start']
+                    e_date = date_map_lookup[sel_path]['end']
+                    st.caption(f"📅 **Sprint Duration:** {s_date} to {e_date}")
+        with c3: load_btn = st.button("🚀 Load Dashboard", type="primary", use_container_width=True)
+
+    if load_btn and sel_path:
+        with st.spinner("🔄 Fetching Data..."):
+            query = f"SELECT [System.Id] FROM WorkItems WHERE {path_filter}"
+            api_url = f"https://dev.azure.com/{ORG}/{urllib.parse.quote(sel_project)}/_apis/wit/wiql?api-version=7.0"
+            r = requests.post(api_url, json={"query": query}, auth=AUTH, headers=HEADERS)
             
-            paths, date_map_lookup = get_iteration_paths_with_dates(sel_project)
-            sel_path = st.selectbox("🏁 Iteration Path", paths if sel_project else [])
-            path_filter = f"[System.IterationPath] UNDER '{sel_path}'"
+            if r.status_code == 200:
+                sprint_ids = [wi['id'] for wi in r.json().get('workItems', [])]
+                data_map = fetch_details(sprint_ids)
+                story_ids = [sid for sid, i in data_map.items() if i["type"] in STORY_TYPES]
+                
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    dev_results = dict(executor.map(lambda sid: (sid, get_developer_when_in_progress(sid, sel_project)), story_ids))
+                
+                m_stats = {"ts": 0, "cs": 0, "bi": 0, "bf": 0, "tc": 0}
+                qa_activity, bug_creators, linkage_table = defaultdict(int), defaultdict(list), []
+                active_users, all_pr_urls = set(), set()
 
-            # NEW: Display dates if they exist for the selected path
-            if sel_path in date_map_lookup:
-                s_date = date_map_lookup[sel_path]['start']
-                e_date = date_map_lookup[sel_path]['end']
-                st.caption(f"📅 **Sprint Duration:** {s_date} to {e_date}")
-    with c3: load_btn = st.button("🚀 Load Dashboard", type="primary", use_container_width=True)
+                for sid, item in data_map.items():
+                    t, s, assigned, creator = item["type"], item["state"], item["assigned_to"], item["created_by"]
+                    if assigned != "Unassigned": active_users.add(assigned)
+                    for url in item["pr_links"]: all_pr_urls.add(url)
 
-if load_btn and sel_path:
-    with st.spinner("🔄 Fetching Data..."):
-        query = f"SELECT [System.Id] FROM WorkItems WHERE {path_filter}"
-        api_url = f"https://dev.azure.com/{ORG}/{urllib.parse.quote(sel_project)}/_apis/wit/wiql?api-version=7.0"
-        r = requests.post(api_url, json={"query": query}, auth=AUTH, headers=HEADERS)
-        
-        if r.status_code == 200:
-            sprint_ids = [wi['id'] for wi in r.json().get('workItems', [])]
-            data_map = fetch_details(sprint_ids)
-            story_ids = [sid for sid, i in data_map.items() if i["type"] in STORY_TYPES]
-            
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                dev_results = dict(executor.map(lambda sid: (sid, get_developer_when_in_progress(sid, sel_project)), story_ids))
-            
-            m_stats = {"ts": 0, "cs": 0, "bi": 0, "bf": 0, "tc": 0}
-            qa_activity, bug_creators, linkage_table = defaultdict(int), defaultdict(list), []
-            active_users, all_pr_urls = set(), set()
+                    if t in STORY_TYPES:
+                        m_stats["ts"] += 1
+                        if s in CLOSED_STATES: m_stats["cs"] += 1
 
-            for sid, item in data_map.items():
-                t, s, assigned, creator = item["type"], item["state"], item["assigned_to"], item["created_by"]
-                if assigned != "Unassigned": active_users.add(assigned)
-                for url in item["pr_links"]: all_pr_urls.add(url)
+                        # Linked bugs for this story
+                        bugs_links = [
+                            f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{int(lid)}" target="_blank">{lid}</a> ({data_map[int(lid)]["state"]})'
+                            for lid in item["raw_links"]
+                            if int(lid) in data_map and data_map[int(lid)]["type"] == "Bug"
+                        ]
 
-                if t in STORY_TYPES:
-                    m_stats["ts"] += 1
-                    if s in CLOSED_STATES: m_stats["cs"] += 1
-
-                    # Linked bugs for this story
-                    bugs_links = [
-                        f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{int(lid)}" target="_blank">{lid}</a> ({data_map[int(lid)]["state"]})'
-                        for lid in item["raw_links"]
-                        if int(lid) in data_map and data_map[int(lid)]["type"] == "Bug"
-                    ]
-
-                    linkage_table.append({
-                        "Type": t,
-                        "ID": f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{sid}" target="_blank">{sid}</a>',
-                        "Title": item["title"],
-                        "Status": s,
-                        "Points": item.get("story_points", 0),
-                        "Bugs": ", ".join(bugs_links) if bugs_links else "—",
-                        "Dev": dev_results.get(sid, "N/A")
-                    })
-
-                elif t == "Bug":
-                    m_stats["bi"] += 1
-                    if s in CLOSED_STATES: m_stats["bf"] += 1
-                    bug_creators[creator].append(f'{sid} ({s})')
-
-                    # Independent bug entry in linkage table
-                    # Only if it is not linked to a story
-                    is_linked = any(
-                        sid in item2.get("raw_links", [])
-                        for item2 in data_map.values()
-                        if item2["type"] in STORY_TYPES
-                    )
-                    if not is_linked:
                         linkage_table.append({
                             "Type": t,
                             "ID": f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{sid}" target="_blank">{sid}</a>',
                             "Title": item["title"],
                             "Status": s,
-                            "Points": 0,
-                            "Bugs": "—",
+                            "Points": item.get("story_points", 0),
+                            "Bugs": ", ".join(bugs_links) if bugs_links else "—",
                             "Dev": dev_results.get(sid, "N/A")
                         })
 
-                elif t == "Test Case":
-                    m_stats["tc"] += 1
-                    qa_activity[assigned] += 1
+                    elif t == "Bug":
+                        m_stats["bi"] += 1
+                        if s in CLOSED_STATES: m_stats["bf"] += 1
+                        bug_creators[creator].append(f'{sid} ({s})')
+
+                        # Independent bug entry in linkage table
+                        # Only if it is not linked to a story
+                        is_linked = any(
+                            sid in item2.get("raw_links", [])
+                            for item2 in data_map.values()
+                            if item2["type"] in STORY_TYPES
+                        )
+                        if not is_linked:
+                            linkage_table.append({
+                                "Type": t,
+                                "ID": f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{sid}" target="_blank">{sid}</a>',
+                                "Title": item["title"],
+                                "Status": s,
+                                "Points": 0,
+                                "Bugs": "—",
+                                "Dev": dev_results.get(sid, "N/A")
+                            })
+
+                    elif t == "Test Case":
+                        m_stats["tc"] += 1
+                        qa_activity[assigned] += 1
 
 
-            pr_lookup = {}
-            if all_pr_urls:
-                with ThreadPoolExecutor(max_workers=10) as exe:
-                    pr_lookup = dict(zip(all_pr_urls, list(exe.map(get_pr_creator, list(all_pr_urls)))))
+                pr_lookup = {}
+                if all_pr_urls:
+                    with ThreadPoolExecutor(max_workers=10) as exe:
+                        pr_lookup = dict(zip(all_pr_urls, list(exe.map(get_pr_creator, list(all_pr_urls)))))
 
-            # --- KPI & HEALTH SECTION ---
-            st.markdown('<div class="section-header">📈 KPI Performance Metrics</div>', unsafe_allow_html=True)
-            # NEW: Show Dates at the top of KPIs
-            # NEW: Display Sprint Dates in balanced, compact columns
-            if not is_kanban and sel_path in date_map_lookup:
-                # Use small equal ratios and a large spacer to prevent stretching
-                d1, d2, spacer = st.columns([1.5, 1.5, 5]) 
+                # --- KPI & HEALTH SECTION ---
+                st.markdown('<div class="section-header">📈 KPI Performance Metrics</div>', unsafe_allow_html=True)
+                # NEW: Show Dates at the top of KPIs
+                # NEW: Display Sprint Dates in balanced, compact columns
+                if not is_kanban and sel_path in date_map_lookup:
+                    # Use small equal ratios and a large spacer to prevent stretching
+                    d1, d2, spacer = st.columns([1.5, 1.5, 5]) 
+                    
+                    with d1:
+                        st.info(f"🗓️ **Start:** {date_map_lookup[sel_path]['start']}")
+                    with d2:
+                        st.info(f"🏁 **End:** {date_map_lookup[sel_path]['end']}")
+
+                s_perc = int((m_stats["cs"]/m_stats["ts"])*100) if m_stats["ts"] > 0 else 0
+                s_perc = int((m_stats["cs"]/m_stats["ts"])*100) if m_stats["ts"] > 0 else 0
+                b_perc = int((m_stats["bf"]/m_stats["bi"])*100) if m_stats["bi"] > 0 else 0
                 
-                with d1:
-                    st.info(f"🗓️ **Start:** {date_map_lookup[sel_path]['start']}")
-                with d2:
-                    st.info(f"🏁 **End:** {date_map_lookup[sel_path]['end']}")
+                health_label, health_color = ("🟢 Healthy", "#28a745") if s_perc > 70 else (("🟡 Warning", "#ffc107") if s_perc > 40 else ("🔴 Critical", "#dc3545"))
 
-            s_perc = int((m_stats["cs"]/m_stats["ts"])*100) if m_stats["ts"] > 0 else 0
-            s_perc = int((m_stats["cs"]/m_stats["ts"])*100) if m_stats["ts"] > 0 else 0
-            b_perc = int((m_stats["bf"]/m_stats["bi"])*100) if m_stats["bi"] > 0 else 0
-            
-            health_label, health_color = ("🟢 Healthy", "#28a745") if s_perc > 70 else (("🟡 Warning", "#ffc107") if s_perc > 40 else ("🔴 Critical", "#dc3545"))
+                k1, k2, k3, k4, k5, k6, k7 = st.columns([1,1,1,1,1,1,1.5])
+                k1.metric("📄 Total Stories", m_stats["ts"])
+                k2.metric("✅ Stories Closed", m_stats["cs"], f"{s_perc}%")
+                k3.metric("🐞 Bugs Identified", m_stats["bi"])
+                k4.metric("🔧 Bugs Fixed", m_stats["bf"], f"{b_perc}%")
+                k5.metric("🧪 Test Cases", m_stats["tc"])
+                k6.metric("👨‍💻 Active Team", len(active_users))
+                with k7:
+                    st.markdown(f'<div class="health-card" style="background-color: {health_color};">💖 Sprint Health: {health_label}</div>', unsafe_allow_html=True)
 
-            k1, k2, k3, k4, k5, k6, k7 = st.columns([1,1,1,1,1,1,1.5])
-            k1.metric("📄 Total Stories", m_stats["ts"])
-            k2.metric("✅ Stories Closed", m_stats["cs"], f"{s_perc}%")
-            k3.metric("🐞 Bugs Identified", m_stats["bi"])
-            k4.metric("🔧 Bugs Fixed", m_stats["bf"], f"{b_perc}%")
-            k5.metric("🧪 Test Cases", m_stats["tc"])
-            k6.metric("👨‍💻 Active Team", len(active_users))
-            with k7:
-                st.markdown(f'<div class="health-card" style="background-color: {health_color};">💖 Sprint Health: {health_label}</div>', unsafe_allow_html=True)
+                # --- RESOURCE MATRIX (KANBAN ONLY) ---
+                # --- RESOURCE PERFORMANCE MATRIX (KANBAN ONLY) ---
+                # --- RESOURCE PERFORMANCE MATRIX (KANBAN ONLY | FIXED) ---
+                if is_kanban:
+                    st.markdown('<div class="section-header">👥 Team Contribution Matrix (Kanban)</div>', unsafe_allow_html=True)
 
-            # --- RESOURCE MATRIX (KANBAN ONLY) ---
-            # --- RESOURCE PERFORMANCE MATRIX (KANBAN ONLY) ---
-            # --- RESOURCE PERFORMANCE MATRIX (KANBAN ONLY | FIXED) ---
-            if is_kanban:
-                st.markdown('<div class="section-header">👥 Team Contribution Matrix (Kanban)</div>', unsafe_allow_html=True)
+                    # contribution[area][person] → counts
+                    contribution = defaultdict(lambda: defaultdict(lambda: {
+                        "User Stories": 0,
+                        "Bugs": 0,
+                        "PRs": 0
+                    }))
 
-                # contribution[area][person] → counts
-                contribution = defaultdict(lambda: defaultdict(lambda: {
-                    "User Stories": 0,
-                    "Bugs": 0,
-                    "PRs": 0
-                }))
+                    # cache revision calls
+                    @st.cache_data(ttl=3600, show_spinner=False)
+                    def get_contributors(work_item_id, project):
+                        url = f"https://dev.azure.com/{ORG}/{urllib.parse.quote(project)}/_apis/wit/workItems/{work_item_id}/revisions?api-version=7.0"
+                        users = set()
+                        try:
+                            r = requests.get(url, auth=AUTH)
+                            if r.status_code == 200:
+                                for rev in r.json().get("value", []):
+                                    fields = rev.get("fields", {})
+                                    changed_by = fields.get("System.ChangedBy")
+                                    if isinstance(changed_by, dict):
+                                        users.add(changed_by.get("displayName"))
+                        except:
+                            pass
+                        return users
 
-                # cache revision calls
-                @st.cache_data(ttl=3600, show_spinner=False)
-                def get_contributors(work_item_id, project):
-                    url = f"https://dev.azure.com/{ORG}/{urllib.parse.quote(project)}/_apis/wit/workItems/{work_item_id}/revisions?api-version=7.0"
-                    users = set()
-                    try:
-                        r = requests.get(url, auth=AUTH)
-                        if r.status_code == 200:
-                            for rev in r.json().get("value", []):
-                                fields = rev.get("fields", {})
-                                changed_by = fields.get("System.ChangedBy")
-                                if isinstance(changed_by, dict):
-                                    users.add(changed_by.get("displayName"))
-                    except:
-                        pass
-                    return users
+                    # --- Collect contributors ---
+                    with ThreadPoolExecutor(max_workers=10) as exe:
+                        revision_results = dict(
+                            exe.map(lambda sid: (sid, get_contributors(sid, sel_project)), data_map.keys())
+                        )
 
-                # --- Collect contributors ---
-                with ThreadPoolExecutor(max_workers=10) as exe:
-                    revision_results = dict(
-                        exe.map(lambda sid: (sid, get_contributors(sid, sel_project)), data_map.keys())
-                    )
+                    for wid, item in data_map.items():
+                        area = item.get("area_path", sel_path)
+                        wtype = item["type"]
 
-                for wid, item in data_map.items():
-                    area = item.get("area_path", sel_path)
-                    wtype = item["type"]
+                        # STORY / BUG contributions
+                        if wtype in STORY_TYPES or wtype == "Bug":
+                            for user in revision_results.get(wid, []):
+                                if not user:
+                                    continue
+                                if wtype in STORY_TYPES:
+                                    contribution[area][user]["User Stories"] += 1
+                                elif wtype == "Bug":
+                                    contribution[area][user]["Bugs"] += 1
 
-                    # STORY / BUG contributions
-                    if wtype in STORY_TYPES or wtype == "Bug":
-                        for user in revision_results.get(wid, []):
-                            if not user:
-                                continue
-                            if wtype in STORY_TYPES:
-                                contribution[area][user]["User Stories"] += 1
-                            elif wtype == "Bug":
-                                contribution[area][user]["Bugs"] += 1
+                        # PR contributions
+                        for pr_url in item["pr_links"]:
+                            pr_owner = pr_lookup.get(pr_url)
+                            if pr_owner:
+                                contribution[area][pr_owner]["PRs"] += 1
 
-                    # PR contributions
-                    for pr_url in item["pr_links"]:
-                        pr_owner = pr_lookup.get(pr_url)
-                        if pr_owner:
-                            contribution[area][pr_owner]["PRs"] += 1
+                    # --- Render UI ---
+                    for area, members in contribution.items():
+                        st.subheader(f"📐 Area Path: {area}")
 
-                # --- Render UI ---
-                for area, members in contribution.items():
-                    st.subheader(f"📐 Area Path: {area}")
+                        rows = []
+                        for person, stats in members.items():
+                            rows.append({
+                                "Team Member": person,
+                                **stats,
+                                "Total": sum(stats.values())
+                            })
 
-                    rows = []
-                    for person, stats in members.items():
-                        rows.append({
-                            "Team Member": person,
-                            **stats,
-                            "Total": sum(stats.values())
-                        })
+                        df = pd.DataFrame(rows).sort_values("Total", ascending=False)
 
-                    df = pd.DataFrame(rows).sort_values("Total", ascending=False)
+                        st.dataframe(
+                            df,
+                            use_container_width=True,
+                            hide_index=True
+                        )
 
-                    st.dataframe(
-                        df,
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                    # --- Save for Excel ---
+                    res_stats = {
+                        f"{area} | {person}": stats
+                        for area, members in contribution.items()
+                        for person, stats in members.items()
+                    }
 
-                # --- Save for Excel ---
-                res_stats = {
-                    f"{area} | {person}": stats
-                    for area, members in contribution.items()
-                    for person, stats in members.items()
-                }
+                
 
-            
+                # --- DISTRIBUTION ---
+                st.markdown('<div class="section-header">📊 Work Item Distribution</div>', unsafe_allow_html=True)
+                st.plotly_chart(px.pie(pd.DataFrame({"Type": ["Stories", "Bugs", "Test Cases"], "Count": [m_stats["ts"], m_stats["bi"], m_stats["tc"]]}), names="Type", values="Count", hole=0.3), use_container_width=True)
 
-            # --- DISTRIBUTION ---
-            st.markdown('<div class="section-header">📊 Work Item Distribution</div>', unsafe_allow_html=True)
-            st.plotly_chart(px.pie(pd.DataFrame({"Type": ["Stories", "Bugs", "Test Cases"], "Count": [m_stats["ts"], m_stats["bi"], m_stats["tc"]]}), names="Type", values="Count", hole=0.3), use_container_width=True)
+                # --- LINKAGE MATRIX ---
+                st.markdown('<div class="section-header">🔗 User Story & Bug Linkage Matrix</div>', unsafe_allow_html=True)
+                st.write(pd.DataFrame(linkage_table).to_html(escape=False, index=False), unsafe_allow_html=True)
 
-            # --- LINKAGE MATRIX ---
-            st.markdown('<div class="section-header">🔗 User Story & Bug Linkage Matrix</div>', unsafe_allow_html=True)
-            st.write(pd.DataFrame(linkage_table).to_html(escape=False, index=False), unsafe_allow_html=True)
+                # --- DEVELOPER PR ACTIVITY ---
+                st.markdown('<div class="section-header">👨‍💻 Developers Activity (PRs)</div>', unsafe_allow_html=True)
+                dev_pr_map = defaultdict(set)
+                for sid, item in data_map.items():
+                    link = f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{sid}" target="_blank">{sid}</a>'
+                    for url in item["pr_links"]:
+                        name = pr_lookup.get(url)
+                        if name: dev_pr_map[name].add(f"{link} ({item['state']})")
+                if dev_pr_map:
+                    st.write(pd.DataFrame([{"Developer": d, "Items": len(v), "Work Items": ", ".join(list(v))} for d, v in dev_pr_map.items()]).to_html(escape=False, index=False), unsafe_allow_html=True)
 
-            # --- DEVELOPER PR ACTIVITY ---
-            st.markdown('<div class="section-header">👨‍💻 Developers Activity (PRs)</div>', unsafe_allow_html=True)
-            dev_pr_map = defaultdict(set)
-            for sid, item in data_map.items():
-                link = f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{sid}" target="_blank">{sid}</a>'
-                for url in item["pr_links"]:
-                    name = pr_lookup.get(url)
-                    if name: dev_pr_map[name].add(f"{link} ({item['state']})")
-            if dev_pr_map:
-                st.write(pd.DataFrame([{"Developer": d, "Items": len(v), "Work Items": ", ".join(list(v))} for d, v in dev_pr_map.items()]).to_html(escape=False, index=False), unsafe_allow_html=True)
+                # --- SPRINT CONTRIBUTORS ---
+                st.markdown('<div class="section-header">👥 Sprint Contributors</div>', unsafe_allow_html=True)
+                contrib_data = defaultdict(lambda: {"Stories":0, "Bugs":0, "Test Cases":0, "PRs":0})
+                for sid, item in data_map.items():
+                    u, t = item["assigned_to"], item["type"]
+                    if u != "Unassigned":
+                        if t in STORY_TYPES: contrib_data[u]["Stories"] += 1
+                        elif t == "Bug": contrib_data[u]["Bugs"] += 1
+                        elif t == "Test Case": contrib_data[u]["Test Cases"] += 1
+                    for url in item["pr_links"]:
+                        p_name = pr_lookup.get(url)
+                        if p_name: contrib_data[p_name]["PRs"] += 1
+                if contrib_data:
+                    st.write(pd.DataFrame([{"Contributor": k, **v} for k, v in contrib_data.items()]).to_html(index=False), unsafe_allow_html=True)
+                
+                st.markdown("""
+                    <style>
+                    /* Force tables to wrap text and not crop content */
+                    table { width: 100% !important; }
+                    td { 
+                        white-space: normal !important; 
+                        word-wrap: break-word !important; 
+                        vertical-align: top !important; 
+                        min-width: 100px;
+                    }
+                    /* Ensure the Bug IDs column has enough room */
+                    th:last-child, td:last-child { min-width: 250px; }
+                    </style>
+                """, unsafe_allow_html=True)
 
-            # --- SPRINT CONTRIBUTORS ---
-            st.markdown('<div class="section-header">👥 Sprint Contributors</div>', unsafe_allow_html=True)
-            contrib_data = defaultdict(lambda: {"Stories":0, "Bugs":0, "Test Cases":0, "PRs":0})
-            for sid, item in data_map.items():
-                u, t = item["assigned_to"], item["type"]
-                if u != "Unassigned":
-                    if t in STORY_TYPES: contrib_data[u]["Stories"] += 1
-                    elif t == "Bug": contrib_data[u]["Bugs"] += 1
-                    elif t == "Test Case": contrib_data[u]["Test Cases"] += 1
-                for url in item["pr_links"]:
-                    p_name = pr_lookup.get(url)
-                    if p_name: contrib_data[p_name]["PRs"] += 1
-            if contrib_data:
-                st.write(pd.DataFrame([{"Contributor": k, **v} for k, v in contrib_data.items()]).to_html(index=False), unsafe_allow_html=True)
-            
-            st.markdown("""
-                <style>
-                /* Force tables to wrap text and not crop content */
-                table { width: 100% !important; }
-                td { 
-                    white-space: normal !important; 
-                    word-wrap: break-word !important; 
-                    vertical-align: top !important; 
-                    min-width: 100px;
-                }
-                /* Ensure the Bug IDs column has enough room */
-                th:last-child, td:last-child { min-width: 250px; }
-                </style>
-            """, unsafe_allow_html=True)
+                # --- QA & BUGS SECTION ---
+                st.markdown('<div class="section-header">👩‍🔬 QA Activity & Bugs Logged</div>', unsafe_allow_html=True)
+                q1, q2 = st.columns(2)
 
-            # --- QA & BUGS SECTION ---
-            st.markdown('<div class="section-header">👩‍🔬 QA Activity & Bugs Logged</div>', unsafe_allow_html=True)
-            q1, q2 = st.columns(2)
+                with q1:
+                    st.write("**Test Cases Created**")
+                    qa_df = pd.DataFrame([{"QA Name": n, "Count": c} for n, c in qa_activity.items()])
+                    st.write(qa_df.to_html(index=False), unsafe_allow_html=True)
 
-            with q1:
-                st.write("**Test Cases Created**")
-                qa_df = pd.DataFrame([{"QA Name": n, "Count": c} for n, c in qa_activity.items()])
-                st.write(qa_df.to_html(index=False), unsafe_allow_html=True)
+                with q2:
+                    st.write("**Bugs Created By**")
+                    bugs_logged_df = pd.DataFrame([
+                        {"Creator": c, "Total Bugs": len(l), "Bug IDs": ", ".join(l)} 
+                        for c, l in bug_creators.items()
+                    ])
+                    
+                    if not bugs_logged_df.empty:
+                        ui_bug_df = bugs_logged_df.copy()
+                        
+                        # Format: BLUE ID (Clickable) + Plain Status
+                        # Added a <span> wrapper to ensure the status stays grouped with the ID
+                        ui_bug_df["Bug IDs"] = ui_bug_df["Bug IDs"].apply(
+                            lambda x: ", ".join([
+                                f'<span style="display:inline-block; margin-right:5px;">'
+                                f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{i.split()[0]}" target="_blank">{i.split()[0]}</a>'
+                                f' {" ".join(i.split()[1:]) if len(i.split()) > 1 else ""}</span>'
+                                for i in x.split(", ")
+                            ])
+                        )
+                        
+                        # Displaying with full container width
+                        st.write(ui_bug_df.to_html(escape=False, index=False, justify='left'), unsafe_allow_html=True)
 
-            with q2:
-                st.write("**Bugs Created By**")
-                bugs_logged_df = pd.DataFrame([
-                    {"Creator": c, "Total Bugs": len(l), "Bug IDs": ", ".join(l)} 
-                    for c, l in bug_creators.items()
-                ])
+                # ======================
+                # PREPARE DATA FOR EXCEL
+                # ======================
+                
+                # 1. KPI Sheet
+                kpi_data = [
+                    {"Metric": "Sprint Start Date", "Value": date_map_lookup.get(sel_path, {}).get("start", "N/A")},
+                    {"Metric": "Sprint End Date", "Value": date_map_lookup.get(sel_path, {}).get("end", "N/A")},
+                    {"Metric": "Total Stories", "Value": m_stats["ts"]},
+                    {"Metric": "Stories Closed", "Value": m_stats["cs"]},
+                    {"Metric": "Story Closure %", "Value": f"{s_perc}%"},
+                    {"Metric": "Bugs Identified", "Value": m_stats["bi"]},
+                    {"Metric": "Bugs Fixed", "Value": m_stats["bf"]},
+                    {"Metric": "Bug Fix %", "Value": f"{b_perc}%"},
+                    {"Metric": "Test Cases", "Value": m_stats["tc"]},
+                    {"Metric": "Active Team Members", "Value": len(active_users)},
+                    {"Metric": "Sprint Health", "Value": health_label}
+                ]
+                kpi_df = pd.DataFrame(kpi_data)
+
+                # 2. Linkage Matrix (Cleaned for Excel)
+                linkage_df_xl = pd.DataFrame(linkage_table).copy()
+                if not linkage_df_xl.empty:
+                    linkage_df_xl['ID'] = linkage_df_xl['ID'].str.replace(r'<[^>]*>', '', regex=True)
+                    linkage_df_xl['Bugs'] = linkage_df_xl['Bugs'].str.replace(r'<[^>]*>', '', regex=True)
+
+                # 3. Developer PRs (Cleaned for Excel)
+                # Use .get() or check if dev_pr_map exists to avoid similar NameErrors
+                pr_df_xl = pd.DataFrame([
+                    {"Developer": d, "Items": len(v), "Work Items": ", ".join(list(v))}
+                    for d, v in dev_pr_map.items()
+                ]) if 'dev_pr_map' in locals() else pd.DataFrame()
+
+                if not pr_df_xl.empty:
+                    pr_df_xl['Work Items'] = pr_df_xl['Work Items'].str.replace(r'<[^>]*>', '', regex=True)
+
+                # 4. Contributors
+                contrib_df = pd.DataFrame([{"Contributor": k, **v} for k, v in contrib_data.items()])
+
+                # 5. Resource Performance (FIX: Added check for res_stats existence)
+                if 'res_stats' in locals():
+                    res_matrix_df = pd.DataFrame([{"Resource": k, **v} for k, v in res_stats.items()])
+                else:
+                    res_matrix_df = pd.DataFrame()
+
+                # ======================
+                # EXCEL GENERATION
+                # ======================
+
+
+            # Create Excel file in memory using BytesIO
+            output = BytesIO()
+
+            # Use ExcelWriter to write the data into the memory
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                # Write your dataframes to different sheets (similar to your code)
+                kpi_df.to_excel(writer, sheet_name="Summary_KPIs", index=False)
+                
+                if not linkage_df_xl.empty:
+                    linkage_df_xl.to_excel(writer, sheet_name="UserStory_Bug_Linkage", index=False)
+                
+                if not contrib_df.empty:
+                    contrib_df.to_excel(writer, sheet_name="Team_Contributors", index=False)
+                
+                if not pr_df_xl.empty:
+                    pr_df_xl.to_excel(writer, sheet_name="Developer_PR_Activity", index=False)
+                
+                if not res_matrix_df.empty:
+                    res_matrix_df.to_excel(writer, sheet_name="Resource_Performance", index=False)
+                
+                if not qa_df.empty:
+                    qa_df.to_excel(writer, sheet_name="QA_Test_Cases", index=False)
                 
                 if not bugs_logged_df.empty:
-                    ui_bug_df = bugs_logged_df.copy()
-                    
-                    # Format: BLUE ID (Clickable) + Plain Status
-                    # Added a <span> wrapper to ensure the status stays grouped with the ID
-                    ui_bug_df["Bug IDs"] = ui_bug_df["Bug IDs"].apply(
-                        lambda x: ", ".join([
-                            f'<span style="display:inline-block; margin-right:5px;">'
-                            f'<a href="https://dev.azure.com/{ORG}/_workitems/edit/{i.split()[0]}" target="_blank">{i.split()[0]}</a>'
-                            f' {" ".join(i.split()[1:]) if len(i.split()) > 1 else ""}</span>'
-                            for i in x.split(", ")
-                        ])
-                    )
-                    
-                    # Displaying with full container width
-                    st.write(ui_bug_df.to_html(escape=False, index=False, justify='left'), unsafe_allow_html=True)
+                    bugs_logged_df.to_excel(writer, sheet_name="Bugs_Logged_By", index=False)
 
-            # ======================
-            # PREPARE DATA FOR EXCEL
-            # ======================
-            
-            # 1. KPI Sheet
-            kpi_data = [
-                {"Metric": "Sprint Start Date", "Value": date_map_lookup.get(sel_path, {}).get("start", "N/A")},
-                {"Metric": "Sprint End Date", "Value": date_map_lookup.get(sel_path, {}).get("end", "N/A")},
-                {"Metric": "Total Stories", "Value": m_stats["ts"]},
-                {"Metric": "Stories Closed", "Value": m_stats["cs"]},
-                {"Metric": "Story Closure %", "Value": f"{s_perc}%"},
-                {"Metric": "Bugs Identified", "Value": m_stats["bi"]},
-                {"Metric": "Bugs Fixed", "Value": m_stats["bf"]},
-                {"Metric": "Bug Fix %", "Value": f"{b_perc}%"},
-                {"Metric": "Test Cases", "Value": m_stats["tc"]},
-                {"Metric": "Active Team Members", "Value": len(active_users)},
-                {"Metric": "Sprint Health", "Value": health_label}
-            ]
-            kpi_df = pd.DataFrame(kpi_data)
+            # Finalize and get the processed data
+            processed_data = output.getvalue()
 
-            # 2. Linkage Matrix (Cleaned for Excel)
-            linkage_df_xl = pd.DataFrame(linkage_table).copy()
-            if not linkage_df_xl.empty:
-                linkage_df_xl['ID'] = linkage_df_xl['ID'].str.replace(r'<[^>]*>', '', regex=True)
-                linkage_df_xl['Bugs'] = linkage_df_xl['Bugs'].str.replace(r'<[^>]*>', '', regex=True)
+            # Make sure to move the cursor back to the start of the BytesIO object
+            output.seek(0)
 
-            # 3. Developer PRs (Cleaned for Excel)
-            # Use .get() or check if dev_pr_map exists to avoid similar NameErrors
-            pr_df_xl = pd.DataFrame([
-                {"Developer": d, "Items": len(v), "Work Items": ", ".join(list(v))}
-                for d, v in dev_pr_map.items()
-            ]) if 'dev_pr_map' in locals() else pd.DataFrame()
-
-            if not pr_df_xl.empty:
-                pr_df_xl['Work Items'] = pr_df_xl['Work Items'].str.replace(r'<[^>]*>', '', regex=True)
-
-            # 4. Contributors
-            contrib_df = pd.DataFrame([{"Contributor": k, **v} for k, v in contrib_data.items()])
-
-            # 5. Resource Performance (FIX: Added check for res_stats existence)
-            if 'res_stats' in locals():
-                res_matrix_df = pd.DataFrame([{"Resource": k, **v} for k, v in res_stats.items()])
-            else:
-                res_matrix_df = pd.DataFrame()
-
-            # ======================
-            # EXCEL GENERATION
-            # ======================
-
-
-        # Create Excel file in memory using BytesIO
-        output = BytesIO()
-
-        # Use ExcelWriter to write the data into the memory
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            # Write your dataframes to different sheets (similar to your code)
-            kpi_df.to_excel(writer, sheet_name="Summary_KPIs", index=False)
-            
-            if not linkage_df_xl.empty:
-                linkage_df_xl.to_excel(writer, sheet_name="UserStory_Bug_Linkage", index=False)
-            
-            if not contrib_df.empty:
-                contrib_df.to_excel(writer, sheet_name="Team_Contributors", index=False)
-            
-            if not pr_df_xl.empty:
-                pr_df_xl.to_excel(writer, sheet_name="Developer_PR_Activity", index=False)
-            
-            if not res_matrix_df.empty:
-                res_matrix_df.to_excel(writer, sheet_name="Resource_Performance", index=False)
-            
-            if not qa_df.empty:
-                qa_df.to_excel(writer, sheet_name="QA_Test_Cases", index=False)
-            
-            if not bugs_logged_df.empty:
-                bugs_logged_df.to_excel(writer, sheet_name="Bugs_Logged_By", index=False)
-
-        # Finalize and get the processed data
-        processed_data = output.getvalue()
-
-        # Make sure to move the cursor back to the start of the BytesIO object
-        output.seek(0)
-
-        # Now you can pass the processed_data to the download button
-        st.sidebar.download_button(
-            label="📥 Download Excel Report",
-            data=processed_data,
-            file_name=f"Delivery_Matrix_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_btn"
-        )
+            # Now you can pass the processed_data to the download button
+            st.sidebar.download_button(
+                label="📥 Download Excel Report",
+                data=processed_data,
+                file_name=f"Delivery_Matrix_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_btn"
+            )
 # Footer
 st.markdown(
     "<div style='text-align:center;color:gray;font-size:12px;'>"
