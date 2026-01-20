@@ -464,7 +464,15 @@ if view_mode == "Delivery Execution":
 
                 # --- LINKAGE MATRIX ---
                 st.markdown('<div class="section-header">🔗 User Story & Bug Linkage Matrix</div>', unsafe_allow_html=True)
-                st.write(pd.DataFrame(linkage_table).to_html(escape=False, index=False), unsafe_allow_html=True)
+                st.dataframe(
+                            pd.DataFrame(linkage_table), 
+                            use_container_width=True, 
+                            hide_index=True,
+                            column_config={
+                                "ID": st.column_config.LinkColumn("Work Item ID"),
+                                "Bugs": st.column_config.TextColumn("Linked Bugs")
+                            }
+                        )
 
                 # --- DEVELOPER PR ACTIVITY ---
                 st.markdown('<div class="section-header">👨‍💻 Developers Activity (PRs)</div>', unsafe_allow_html=True)
@@ -538,7 +546,11 @@ if view_mode == "Delivery Execution":
                         )
                         
                         # Displaying with full container width
-                        st.write(ui_bug_df.to_html(escape=False, index=False, justify='left'), unsafe_allow_html=True)
+                        st.dataframe(
+                            bugs_logged_df, # Use the clean dataframe without the <span> tags
+                            use_container_width=True,
+                            hide_index=True
+                        )
 
                 # ======================
                 # PREPARE DATA FOR EXCEL
