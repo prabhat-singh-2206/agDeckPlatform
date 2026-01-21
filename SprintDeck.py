@@ -200,6 +200,11 @@ if view_mode == "Squad Governance":
         res = st.session_state.gov_results
         df = res["df"]
         
+        # --- Health Summary Row ---
+        h1, h2 = st.columns(2)
+        h1.metric("Active Squads", len(df))
+        h2.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
+        
         # --- Summary Tile Section (Expanded to 6 columns) ---
         m1, m2, m3, m4, m5, m6 = st.columns(6)
         
@@ -222,10 +227,7 @@ if view_mode == "Squad Governance":
 
         st.markdown("---") # Visual separator
 
-        # --- Health Summary Row ---
-        h1, h2 = st.columns(2)
-        h1.metric("Active Squads", len(df))
-        h2.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
+        
 
         # --- Plotly Chart (Unchanged) ---
         fig_health = px.bar(
