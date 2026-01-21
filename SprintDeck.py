@@ -192,9 +192,7 @@ if view_mode == "Squad Governance":
                 }
             else:
                 st.session_state.gov_results = None
-                st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")
-
-    # 3. UI RENDERING
+                
     # 3. UI RENDERING
     if st.session_state.gov_results:
         res = st.session_state.gov_results
