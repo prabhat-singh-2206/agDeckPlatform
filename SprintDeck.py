@@ -199,7 +199,11 @@ if view_mode == "Squad Governance":
     if st.session_state.gov_results:
         res = st.session_state.gov_results
         df = res["df"]
-        
+        # --- SAFETY FIX: ensure bug columns always exist ---
+        for col in ["SIT Bugs", "UAT Bugs"]:
+            if col not in df.columns:
+                df[col] = 0
+
         # --- Health Summary Row ---
         h1, h2 = st.columns(2)
         h1.metric("Active Squads", len(df))
