@@ -141,6 +141,10 @@ def get_developer_when_in_progress(work_item_id, project):
     except: pass
     return "Not Found"
 
+def reset_search():
+    st.session_state.search_attempted = False
+    st.session_state.gov_results = None
+
 # ======================
 # MAIN UI
 # ======================
@@ -172,7 +176,7 @@ if view_mode == "Squad Governance":
     with st.expander("⚙️ Report Settings", expanded=True):
         col_a, col_b = st.columns(2)
         with col_a: 
-            sel_proj = st.selectbox("Select Project", all_projects)
+            sel_proj = st.selectbox("Select Project", all_projects, on_change=reset_search)
         with col_b: 
             lookback = st.number_input("Lookback Window (Days)", value=30, min_value=1)
         
@@ -192,7 +196,8 @@ if view_mode == "Squad Governance":
                 }
             else:
                 st.session_state.gov_results = None
-                
+
+    # 3. UI RENDERING
     # 3. UI RENDERING
     if st.session_state.gov_results:
         res = st.session_state.gov_results
