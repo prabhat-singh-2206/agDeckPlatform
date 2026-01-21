@@ -199,14 +199,15 @@ if view_mode == "Squad Governance":
         res = st.session_state.gov_results
         df = res["df"]
         
-        # --- Metrics ---
-        m1, m2, m3, m4 = st.columns(4)
+        # --- Metrics (Updated to show QA and UAT Bug split) ---
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Active Squads", len(df))
         m2.metric("Total Stories", int(df["Total Stories"].sum()))
-        m3.metric("Bugs Logged", int(df["Bugs Found"].sum()))
-        m4.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
+        m3.metric("QA Bugs", int(df.get("QA Bugs", 0).sum()))
+        m4.metric("UAT Bugs", int(df.get("UAT Bugs", 0).sum()))
+        m5.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
 
-        # --- Plotly Chart (For UI) ---
+        # --- Plotly Chart (Unchanged) ---
         fig_health = px.bar(
             df, x="Squad Name", y="Health Score", 
             color="Health Score", color_continuous_scale="RdYlGn",
@@ -214,45 +215,39 @@ if view_mode == "Squad Governance":
         )
         st.plotly_chart(fig_health, use_container_width=True, key="gov_plotly")
         
-        # --- Data Table ---
-        st.dataframe(df.drop(columns=["Full Area Path"], errors='ignore'), hide_index=True, use_container_width=True)
+        # --- Data Table (Now shows QA Bugs and UAT Bugs automatically from df) ---
+        st.dataframe(
+            df.drop(columns=["Full Area Path"], errors='ignore'), 
+            hide_index=True, 
+            use_container_width=True
+        )
 
-        # --- 4. MATPLOTLIB FOR EXCEL (No Chrome Needed) ---
+        # --- 4. MATPLOTLIB FOR EXCEL (Unchanged) ---
         image_data = io.BytesIO()
         try:
             plt.figure(figsize=(10, 5))
-            
-            # 1. Setup normalization and colormap (Matches Plotly RdYlGn)
-            # We use the full 0-100 range for normalization to keep color consistent
             norm = mcolors.Normalize(vmin=0, vmax=100) 
             cmap = plt.get_cmap('RdYlGn')
-            
-            # 2. Map colors
             bar_colors = [cmap(norm(value)) for value in df["Health Score"]]
-            
-            # 3. Create bars
             bars = plt.bar(df["Squad Name"], df["Health Score"], color=bar_colors, edgecolor='black', linewidth=0.5)
             
-            # 4. ADD DATA LABELS ON TOP OF BARS
             for bar in bars:
                 height = bar.get_height()
                 plt.text(
-                    bar.get_x() + bar.get_width()/2., # X position: center of the bar
-                    height + 1,                       # Y position: just above the top
-                    f'{height:.1f}%',                 # The label text
-                    ha='center', va='bottom',         # Alignment
+                    bar.get_x() + bar.get_width()/2.,
+                    height + 1,
+                    f'{height:.1f}%',
+                    ha='center', va='bottom',
                     fontsize=10, fontweight='bold'
                 )
 
-            # Styling
             plt.title(f"Squad Health Overview: {res['project']}", fontsize=14, pad=20)
             plt.ylabel("Health Score (%)", fontsize=12)
-            plt.ylim(0, 110) # Set to 110 to give room for the labels
+            plt.ylim(0, 110)
             plt.xticks(rotation=45, ha='right')
             plt.grid(axis='y', linestyle='--', alpha=0.3)
             plt.tight_layout()
             
-            # Save to buffer
             plt.savefig(image_data, format='png', dpi=100)
             plt.close()
             image_data.seek(0)
@@ -263,6 +258,7 @@ if view_mode == "Squad Governance":
         # --- 5. EXCEL EXPORT ---
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            # The exported excel sheet will also contain the new QA/UAT columns
             df.to_excel(writer, index=False, sheet_name='Data_Report')
             
             if image_data:
@@ -271,8 +267,6 @@ if view_mode == "Squad Governance":
                 header_format = workbook.add_format({'bold': True, 'font_size': 14, 'font_color': '#0078d4'})
                 worksheet.write('B2', f"Governance Report: {res['project']}", header_format)
                 worksheet.write('B3', f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-                
-                # Insert the Matplotlib image
                 worksheet.insert_image('B5', 'health_chart.png', {'image_data': image_data})
 
         # --- 6. DOWNLOAD BUTTON ---
@@ -285,7 +279,7 @@ if view_mode == "Squad Governance":
         )
     
     elif st.session_state.search_attempted and st.session_state.gov_results is None:
-        st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")
+        st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")    
 
 # --- RESOURCE EXECUTION VIEW ---
 if view_mode == "Resource Execution":
