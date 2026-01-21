@@ -195,17 +195,37 @@ if view_mode == "Squad Governance":
                 st.warning(f"No activity found for '{sel_proj}' in the last {lookback} days.")
 
     # 3. UI RENDERING
+    # 3. UI RENDERING
     if st.session_state.gov_results:
         res = st.session_state.gov_results
         df = res["df"]
         
-        # --- Metrics (Updated to show QA and UAT Bug split) ---
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Active Squads", len(df))
-        m2.metric("Total Stories", int(df["Total Stories"].sum()))
-        m3.metric("QA Bugs", int(df.get("QA Bugs", 0).sum()))
-        m4.metric("UAT Bugs", int(df.get("UAT Bugs", 0).sum()))
-        m5.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
+        # --- Summary Tile Section (Expanded to 6 columns) ---
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        
+        # 1. Total Stories
+        m1.metric("Planned Stories", int(df["Total Stories"].sum()))
+        
+        # 2. Total Closed Stories (New Requirement)
+        m2.metric("Planned Closed Stories", int(df["Closed Stories"].sum()))
+        
+        # 3. Total Velocity (New Requirement)
+        m3.metric("Total Velocity", int(df["Velocity (Points)"].sum()))
+        
+        # 4. Total Bugs Found (New Requirement)
+        m4.metric("Total Bugs", int(df["Bugs Found"].sum()))
+        
+        # 5. QA/UAT Split
+        # Using the inclusive logic where QA = Total - UAT if tags are missing
+        m5.metric("SIT Bugs", int(df["SIT Bugs"].sum()))
+        m6.metric("UAT Bugs", int(df["UAT Bugs"].sum()))
+
+        st.markdown("---") # Visual separator
+
+        # --- Health Summary Row ---
+        h1, h2 = st.columns(2)
+        h1.metric("Active Squads", len(df))
+        h2.metric("Avg Health Score", f"{df['Health Score'].mean():.1f}%")
 
         # --- Plotly Chart (Unchanged) ---
         fig_health = px.bar(

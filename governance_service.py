@@ -5,19 +5,16 @@ from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 def get_area_governance_report(org, project, days, auth, story_types):
-    # Schema remains the same for the output report
     columns = [
         "Squad Name", "Total Stories", "Closed Stories", 
-        "Velocity (Points)", "QA Bugs", "UAT Bugs", "Bugs Found", 
+        "Velocity (Points)", "SIT Bugs", "UAT Bugs", "Bugs Found", 
         "Health Score", "Full Area Path"
     ]
     since_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%d')
 
-    # API URLs
     proj_encoded = urllib.parse.quote(project)
     wiql_url = f"https://dev.azure.com/{org}/{proj_encoded}/_apis/wit/wiql?api-version=7.1"
     
-    # 1. Fetch IDs
     query = {"query": f"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '{project}' AND [System.ChangedDate] >= '{since_date}'"}
     res = requests.post(wiql_url, json=query, auth=auth)
     
@@ -29,12 +26,13 @@ def get_area_governance_report(org, project, days, auth, story_types):
         return pd.DataFrame(columns=columns)
 
     # 2. Fetch Data 
-    # MODIFIED: Replaced System.Tags with Custom.BugPhase (or your specific field name)
+    # Added 'Custom.RaisedBy' to fields based on your second screenshot
     batch_url = f"https://dev.azure.com/{org}/_apis/wit/workitemsbatch?api-version=7.1"
     fields = [
         "System.Id", "System.WorkItemType", "System.State", 
         "System.AreaPath", "Microsoft.VSTS.Scheduling.StoryPoints", 
-        "Custom.BugPhase" # Based on your screenshot "Bug Phase" field
+        "Custom.BugPhase",  # Field from screenshot 1
+        "Custom.RaisedBy"   # Field from screenshot 2
     ]
     wi_data = []
     
@@ -45,7 +43,7 @@ def get_area_governance_report(org, project, days, auth, story_types):
             wi_data.extend(r.json().get("value", []))
 
     # 3. Process
-    stats = defaultdict(lambda: {"Stories": 0, "Bugs": 0, "QA_Bugs": 0, "UAT_Bugs": 0, "Closed": 0, "Points": 0})
+    stats = defaultdict(lambda: {"Stories": 0, "Bugs": 0, "SIT_Bugs": 0, "UAT_Bugs": 0, "Closed": 0, "Points": 0})
     
     for item in wi_data:
         f = item.get("fields", {})
@@ -54,8 +52,9 @@ def get_area_governance_report(org, project, days, auth, story_types):
         state = f.get("System.State")
         pts = f.get("Microsoft.VSTS.Scheduling.StoryPoints", 0) or 0
         
-        # MODIFIED: Logic to use Bug Phase values 'Aventra' and 'UAT'
+        # Extracting the new logic fields
         bug_phase = f.get("Custom.BugPhase", "")
+        raised_by = f.get("Custom.RaisedBy", "")
 
         if wtype in story_types:
             stats[area]["Stories"] += 1
@@ -66,13 +65,14 @@ def get_area_governance_report(org, project, days, auth, story_types):
         elif wtype == "Bug":
             stats[area]["Bugs"] += 1
             
-            # Logic based on our discussion:
-            # Aventra = QA Phase
-            # UAT = UAT Phase
-            if bug_phase == "UAT":
+            # Identify if it is a UAT bug based on your query rules
+            is_uat = (bug_phase == "UAT") or (raised_by not in ["Aventra QA", "Aventra Developer"] and raised_by != "")
+            
+            if is_uat:
                 stats[area]["UAT_Bugs"] += 1
-            elif bug_phase == "Aventra":
-                stats[area]["QA_Bugs"] += 1
+            else:
+                # If it's not UAT, and it was raised by the internal team, it's a QA bug
+                stats[area]["SIT_Bugs"] += 1
 
     # 4. Final Rows
     rows = []
@@ -83,7 +83,7 @@ def get_area_governance_report(org, project, days, auth, story_types):
             "Total Stories": d["Stories"],
             "Closed Stories": d["Closed"],
             "Velocity (Points)": d["Points"],
-            "QA Bugs": d["QA_Bugs"],
+            "SIT Bugs": d["SIT_Bugs"],
             "UAT Bugs": d["UAT_Bugs"],
             "Bugs Found": d["Bugs"],
             "Health Score": round((d["Closed"]/d["Stories"]*100), 1) if d["Stories"] > 0 else 0,
